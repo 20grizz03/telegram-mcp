@@ -1,0 +1,25 @@
+# Build output
+/bin/
+/dist/
+*.exe
+
+# Local Telegram credentials and state
+.env
+.env.*
+!.env.example
+mcp.env
+session.json
+*.session
+cache.db
+*.db
+*.db-shm
+*.db-wal
+
+# Local data directories
+.tgmcp/
+tg-mcp/
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
