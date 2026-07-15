@@ -18,6 +18,47 @@ func md(text string) styling.StyledTextOption {
 	return markdown.String(nil, text)
 }
 
+// UpdateChatDescription changes the description of a basic group,
+// supergroup or channel. An empty description clears the existing value.
+func (c *Client) UpdateChatDescription(ctx context.Context, chatID int64, description string) error {
+	pi, err := c.resolvePeer(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if pi.kind != KindChat && pi.kind != KindChannel {
+		return fmt.Errorf("chat %d is not a group, supergroup or channel", chatID)
+	}
+
+	ok, err := c.api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+		Peer:  pi.input,
+		About: description,
+	})
+	if err != nil {
+		return fmt.Errorf("update description for chat %d: %w", chatID, err)
+	}
+	if !ok {
+		return fmt.Errorf("telegram did not confirm description update for chat %d", chatID)
+	}
+	return nil
+}
+
+// UpdateProfileBio changes the bio of the authenticated Telegram account. An
+// empty bio clears it. SetAbout must be used even for an empty value, otherwise
+// Telegram interprets the field as omitted instead of clearing it.
+func (c *Client) UpdateProfileBio(ctx context.Context, bio string) error {
+	_, err := c.api.AccountUpdateProfile(ctx, profileBioRequest(bio))
+	if err != nil {
+		return fmt.Errorf("update profile bio: %w", err)
+	}
+	return nil
+}
+
+func profileBioRequest(bio string) *tg.AccountUpdateProfileRequest {
+	req := &tg.AccountUpdateProfileRequest{}
+	req.SetAbout(bio)
+	return req
+}
+
 // PublishPost posts a new message (optionally a photo with caption, optionally
 // scheduled) to a chat/channel. text is markdown. Exactly one of photoPath /
 // photoURL may be set; both empty means a plain text post (text required).

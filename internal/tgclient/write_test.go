@@ -42,3 +42,10 @@ func TestPublishedMessageIDReturnsSendError(t *testing.T) {
 		t.Fatalf("publishedMessageID error = %v, want %v", err, want)
 	}
 }
+
+func TestProfileBioRequestCanClearBio(t *testing.T) {
+	req := profileBioRequest("")
+	if bio, ok := req.GetAbout(); !ok || bio != "" {
+		t.Fatalf("GetAbout() = %q, %v; want empty value explicitly set", bio, ok)
+	}
+}

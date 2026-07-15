@@ -23,12 +23,13 @@ type handlers struct {
 
 // Build constructs the MCP server with all tools registered. Local CRM/outbox
 // tools never contact Telegram. When enableWrite is true, the posting tools
-// (publish_post, edit_post, pin_post, forward_post) are also exposed.
+// (publish_post, edit_post, pin_post, forward_post,
+// update_chat_description, update_profile_bio) are also exposed.
 func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 	h := &handlers{tc: tc, st: st}
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "telegram-mcp",
-		Version: "0.4.3",
+		Version: "0.4.4",
 	}, nil)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -173,6 +174,19 @@ func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 		}, h.createSharedFolder)
 
 		mcp.AddTool(s, &mcp.Tool{
+			Name: "update_chat_description",
+			Description: "Change the REAL description of a group, supergroup or channel by chat_id. " +
+				"Pass an empty description to clear it. This changes Telegram state and is only exposed " +
+				"when TGMCP_ENABLE_WRITE is enabled.",
+		}, h.updateChatDescription)
+
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "update_profile_bio",
+			Description: "Change the REAL bio of the authenticated Telegram account. Pass an empty bio " +
+				"to clear it. This changes Telegram state and is only exposed when TGMCP_ENABLE_WRITE is enabled.",
+		}, h.updateProfileBio)
+
+		mcp.AddTool(s, &mcp.Tool{
 			Name: "publish_post",
 			Description: "Publish a NEW post to a channel/chat under YOUR account — real subscribers " +
 				"will receive it. text is markdown. Optionally attach one photo (photo_path = local file, " +
@@ -199,6 +213,44 @@ func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 	}
 
 	return s
+}
+
+// ---- update_chat_description ----
+
+type updateChatDescriptionIn struct {
+	ChatID      int64  `json:"chat_id" jsonschema:"numeric chat id from list_chats; must be a group, supergroup or channel"`
+	Description string `json:"description" jsonschema:"new description; pass an empty string to clear it"`
+}
+
+type updateChatDescriptionOut struct {
+	ChatID      int64  `json:"chat_id"`
+	Description string `json:"description"`
+	Updated     bool   `json:"updated"`
+}
+
+func (h *handlers) updateChatDescription(ctx context.Context, _ *mcp.CallToolRequest, in updateChatDescriptionIn) (*mcp.CallToolResult, updateChatDescriptionOut, error) {
+	if err := h.tc.UpdateChatDescription(ctx, in.ChatID, in.Description); err != nil {
+		return nil, updateChatDescriptionOut{}, err
+	}
+	return nil, updateChatDescriptionOut{ChatID: in.ChatID, Description: in.Description, Updated: true}, nil
+}
+
+// ---- update_profile_bio ----
+
+type updateProfileBioIn struct {
+	Bio string `json:"bio" jsonschema:"new profile bio; pass an empty string to clear it"`
+}
+
+type updateProfileBioOut struct {
+	Bio     string `json:"bio"`
+	Updated bool   `json:"updated"`
+}
+
+func (h *handlers) updateProfileBio(ctx context.Context, _ *mcp.CallToolRequest, in updateProfileBioIn) (*mcp.CallToolResult, updateProfileBioOut, error) {
+	if err := h.tc.UpdateProfileBio(ctx, in.Bio); err != nil {
+		return nil, updateProfileBioOut{}, err
+	}
+	return nil, updateProfileBioOut{Bio: in.Bio, Updated: true}, nil
 }
 
 // ---- list_chats ----
