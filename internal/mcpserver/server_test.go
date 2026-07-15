@@ -179,7 +179,7 @@ func TestGrowthCRMToolsAreLocalOnly(t *testing.T) {
 
 	chatID := int64(1234567890)
 	base := store.GrowthSnapshot{
-		ChatID: chatID, Title: "На пульсе IT", Username: "onItPulse",
+		ChatID: chatID, Title: "Example Tech", Username: "exampletech",
 		Posts: 8, MaturePosts: 6, MedianViews: 12, WindowHours: 168,
 		MatureAfterHours: 72, CapturedAt: time.Now().UTC().Add(-24 * time.Hour),
 	}

@@ -117,13 +117,13 @@ func TestGrowthSnapshots(t *testing.T) {
 	secondAt := firstAt.Add(24 * time.Hour)
 	for _, snap := range []GrowthSnapshot{
 		{
-			ChatID: chatID, Title: "На пульсе IT", Username: "onItPulse",
+			ChatID: chatID, Title: "Example Tech", Username: "exampletech",
 			Subscribers: 14, Posts: 7, MaturePosts: 5, MedianViews: 11,
 			MedianForwards: 1, MedianReactions: 2, WindowHours: 168,
 			MatureAfterHours: 72, CapturedAt: firstAt,
 		},
 		{
-			ChatID: chatID, Title: "На пульсе IT", Username: "onItPulse",
+			ChatID: chatID, Title: "Example Tech", Username: "exampletech",
 			Subscribers: 17, Posts: 8, MaturePosts: 6, MedianViews: 13,
 			MedianForwards: 2, MedianReactions: 3, WindowHours: 168,
 			MatureAfterHours: 72, CapturedAt: secondAt,
