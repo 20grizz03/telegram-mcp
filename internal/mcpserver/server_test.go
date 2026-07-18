@@ -123,6 +123,50 @@ func TestPreferenceTools(t *testing.T) {
 	}
 }
 
+func TestWatchTools(t *testing.T) {
+	cs, _ := connect(t)
+	chat := int64(1835029676)
+
+	// add a watch with two topics + focus
+	add := call(t, cs, "watch_add", map[string]any{
+		"chat_id":   chat,
+		"topic_ids": []int{22580, 1},
+		"label":     "ОМ: ВУ",
+		"focus":     "деньги/вывод/ИП",
+	})
+	var aout watchAddOut
+	araw, _ := json.Marshal(add.StructuredContent)
+	if err := json.Unmarshal(araw, &aout); err != nil {
+		t.Fatal(err)
+	}
+	if aout.Watch.ChatID != chat || len(aout.Watch.TopicIDs) != 2 || !aout.Watch.Enabled || aout.Watch.Focus == "" {
+		t.Fatalf("watch_add = %+v", aout.Watch)
+	}
+
+	// re-add same chat updates (upsert keyed by chat_id) -> still one row
+	call(t, cs, "watch_add", map[string]any{"chat_id": chat, "topic_ids": []int{22580}, "label": "upd"})
+
+	list := call(t, cs, "watch_list", map[string]any{})
+	var lout watchListOut
+	lraw, _ := json.Marshal(list.StructuredContent)
+	if err := json.Unmarshal(lraw, &lout); err != nil {
+		t.Fatal(err)
+	}
+	if lout.Count != 1 || len(lout.Watchlist) != 1 {
+		t.Fatalf("watch_list = %+v, want 1 row after upsert", lout)
+	}
+	if got := lout.Watchlist[0].TopicIDs; len(got) != 1 || got[0] != 22580 {
+		t.Fatalf("topics after upsert = %v, want [22580]", got)
+	}
+	id := lout.Watchlist[0].ID
+
+	del := call(t, cs, "watch_remove", map[string]any{"id": id})
+	draw, _ := json.Marshal(del.StructuredContent)
+	if !strings.Contains(string(draw), "true") {
+		t.Fatalf("watch_remove = %s, want removed true", draw)
+	}
+}
+
 func TestGrowthCRMToolsAreLocalOnly(t *testing.T) {
 	cs, st := connect(t)
 	ctx := context.Background()
@@ -301,6 +345,7 @@ func TestToolsRegister(t *testing.T) {
 		"list_channel_folders", "list_chats", "list_growth_snapshots", "list_invite_links", "list_outreach_drafts",
 		"list_partners", "list_pinned_messages", "list_preferences", "list_scheduled_posts", "list_topics", "read_chat", "save_partner", "save_preference",
 		"search_chat", "sync_chat", "update_outreach_draft",
+		"watch_add", "watch_list", "watch_remove",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("tools = %v, want %v", names, want)

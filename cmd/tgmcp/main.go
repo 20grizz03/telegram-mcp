@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,9 +53,12 @@ func main() {
 }
 
 func run(cmd string) error {
-	// pref manages learned rules directly in the DB and needs no Telegram creds.
+	// pref and watch manage local DB state and need no Telegram creds.
 	if cmd == "pref" {
 		return runPref(os.Args[2:])
+	}
+	if cmd == "watch" {
+		return runWatch(os.Args[2:])
 	}
 
 	cfg, err := config.Load()
@@ -221,6 +225,80 @@ func run(cmd string) error {
 		}
 		return nil
 
+	case "send":
+		// send [--html] <chat_id> "<text>" [topic_id]
+		// Deliberately NOT gated by TGMCP_ENABLE_WRITE: the CLI is a deterministic,
+		// user-invoked path (used by the daily-digest job). Only the MCP tool is gated.
+		asHTML := false
+		var pos []string
+		for _, a := range os.Args[2:] {
+			if a == "--html" {
+				asHTML = true
+				continue
+			}
+			pos = append(pos, a)
+		}
+		if len(pos) < 2 {
+			return fmt.Errorf(`usage: tgmcp send [--html] <chat_id> "<text>" [topic_id]`)
+		}
+		id, err := strconv.ParseInt(pos[0], 10, 64)
+		if err != nil {
+			return fmt.Errorf("bad chat_id: %w", err)
+		}
+		text := pos[1]
+		topicID := 0
+		if len(pos) >= 3 {
+			topicID, _ = strconv.Atoi(pos[2])
+		}
+		return tc.Run(ctx, func(ctx context.Context) error {
+			if err := tc.EnsureAuthorized(ctx); err != nil {
+				return err
+			}
+			msgID, err := tc.SendMessage(ctx, id, text, topicID, asHTML)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("sent to %d (topic %d, html=%v), msg_id=%d\n", id, topicID, asHTML, msgID)
+			return nil
+		})
+
+	case "dump":
+		// Like `read` but prints FULL message text (no 80-char truncation) — the
+		// raw input for the digest summarizer. One topic per call.
+		if len(os.Args) < 3 {
+			return fmt.Errorf("usage: tgmcp dump <chat_id> [from] [topic_id]")
+		}
+		id, err := strconv.ParseInt(os.Args[2], 10, 64)
+		if err != nil {
+			return fmt.Errorf("bad chat_id: %w", err)
+		}
+		from := "24h"
+		if len(os.Args) >= 4 {
+			from = os.Args[3]
+		}
+		topicID := 0
+		if len(os.Args) >= 5 {
+			topicID, _ = strconv.Atoi(os.Args[4])
+		}
+		return tc.Run(ctx, func(ctx context.Context) error {
+			if err := tc.EnsureAuthorized(ctx); err != nil {
+				return err
+			}
+			chat, msgs, err := tc.ReadChat(ctx, id, topicID, from, "", 2000)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("### %s (topic %d) — %d messages [from=%s]\n", chat.Title, topicID, len(msgs), from)
+			for _, m := range msgs {
+				d := ""
+				if len(m.DateISO) >= 10 {
+					d = m.DateISO[:10]
+				}
+				fmt.Printf("[%s %s] %s: %s  %s\n", d, m.TimeLocal, m.Author.Name, m.Text, m.Link)
+			}
+			return nil
+		})
+
 	case "serve":
 		st, err := store.Open(cfg.DBPath())
 		if err != nil {
@@ -345,6 +423,132 @@ func scopeLabel(scope string, chatID *int64) string {
 	return scope
 }
 
+// runWatch manages the daily-digest watchlist directly in the SQLite store.
+//
+//	tgmcp watch add <chat_id> [topic_ids_csv] [--label "<text>"] [--focus "<brief>"]
+//	tgmcp watch list [--plain]
+//	tgmcp watch rm <id>
+func runWatch(args []string) error {
+	home, err := config.ResolveHome()
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(config.Config{Home: home}.DBPath())
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	if len(args) == 0 {
+		return fmt.Errorf(`usage: tgmcp watch add <chat_id> [topic_ids_csv] [--label "<text>"] [--focus "<brief>"] | watch list [--plain] | watch rm <id>`)
+	}
+
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			return fmt.Errorf(`usage: tgmcp watch add <chat_id> [topic_ids_csv] [--label "<text>"] [--focus "<brief>"]`)
+		}
+		chatID, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("bad chat_id: %w", err)
+		}
+		var (
+			topicIDs     []int
+			label, focus string
+			gotCSV       bool
+		)
+		rest := args[2:]
+		for i := 0; i < len(rest); i++ {
+			switch {
+			case rest[i] == "--label" && i+1 < len(rest):
+				label = rest[i+1]
+				i++
+			case rest[i] == "--focus" && i+1 < len(rest):
+				focus = rest[i+1]
+				i++
+			case !gotCSV:
+				gotCSV = true
+				for _, p := range strings.Split(rest[i], ",") {
+					if p = strings.TrimSpace(p); p == "" {
+						continue
+					}
+					n, err := strconv.Atoi(p)
+					if err != nil {
+						return fmt.Errorf("bad topic id %q: %w", p, err)
+					}
+					topicIDs = append(topicIDs, n)
+				}
+			}
+		}
+		w, err := st.AddWatch(ctx, chatID, topicIDs, label, focus)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("watched #%d chat=%d topics=%v label=%q focus=%.40q\n", w.ID, w.ChatID, w.TopicIDs, w.Label, w.Focus)
+		return nil
+
+	case "list":
+		// --plain: machine-readable, enabled-only, "chatID\ttopicsCSV\tlabel\tfocus" per line.
+		plain := len(args) >= 2 && args[1] == "--plain"
+		ws, err := st.ListWatch(ctx, plain)
+		if err != nil {
+			return err
+		}
+		if plain {
+			for _, w := range ws {
+				fmt.Printf("%d\t%s\t%s\t%s\n", w.ChatID, encodeTopicCSV(w.TopicIDs), w.Label, w.Focus)
+			}
+			return nil
+		}
+		if len(ws) == 0 {
+			fmt.Println("watchlist empty")
+			return nil
+		}
+		for _, w := range ws {
+			on := "on"
+			if !w.Enabled {
+				on = "off"
+			}
+			fmt.Printf("#%-3d [%s] chat=%-14d topics=%v %s\n", w.ID, on, w.ChatID, w.TopicIDs, w.Label)
+			if w.Focus != "" {
+				fmt.Printf("        focus: %s\n", w.Focus)
+			}
+		}
+		return nil
+
+	case "rm":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: tgmcp watch rm <id>")
+		}
+		id, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("bad id: %w", err)
+		}
+		ok, err := st.DeleteWatch(ctx, id)
+		if err != nil {
+			return err
+		}
+		if ok {
+			fmt.Printf("deleted #%d\n", id)
+		} else {
+			fmt.Printf("no watch #%d\n", id)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unknown watch subcommand %q (add|list|rm)", args[0])
+	}
+}
+
+func encodeTopicCSV(ids []int) string {
+	parts := make([]string, len(ids))
+	for i, n := range ids {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ",")
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `tgmcp — Telegram summarizer MCP server
 
@@ -354,6 +558,9 @@ Commands:
   pref    manage learned rules: pref add "<rule>" [--chat <id>] | pref list [--chat <id>] | pref rm <id>
   sync    cache a chat's messages: sync <chat_id> [topic_id] [max]
   search  full-text search the cache: search <query> [chat_id]
+  send    send a message: send [--html] <chat_id> "<text>" [topic_id]
+  dump    print full message text for a window (digest input): dump <chat_id> [from] [topic_id]
+  watch   manage digest watchlist: watch add <chat_id> [topic_ids_csv] [--label "<text>"] [--focus "<brief>"] | watch list [--plain] | watch rm <id>
   serve   run the MCP server over stdio (configured in Claude Desktop)
 
 Required env: TG_APP_ID, TG_APP_HASH   (from https://my.telegram.org)

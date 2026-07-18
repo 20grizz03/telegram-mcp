@@ -117,6 +117,16 @@ CREATE TABLE IF NOT EXISTS growth_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_growth_snapshots_chat_time
     ON growth_snapshots(chat_id, captured_at DESC);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL UNIQUE,
+    topic_ids  TEXT NOT NULL DEFAULT '',
+    label      TEXT NOT NULL DEFAULT '',
+    focus      TEXT NOT NULL DEFAULT '',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+);
 `
 
 // ftsSchema is created separately so a sqlite build without FTS5 degrades

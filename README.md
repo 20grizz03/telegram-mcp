@@ -8,7 +8,9 @@ MCP-сервер на Go для работы с Telegram через пользо
 Суммаризацию выполняет MCP-клиент: `telegram-mcp` отвечает только за получение и
 изменение данных Telegram.
 
-Изначальная версия проекта создана [@linemk](https://github.com/linemk).
+Изначальная версия проекта создана [@linemk](https://github.com/linemk). Инструменты
+`send_message`, watchlist и готовый скрипт ежедневного дайджеста (`scripts/`) добавлены
+им же в рамках совместной разработки.
 
 > [!WARNING]
 > Авторизация пользовательским аккаунтом через сторонний MTProto-клиент может
@@ -37,9 +39,10 @@ MCP-сервер на Go для работы с Telegram через пользо
 | `save_preference`, `list_preferences`, `delete_preference` | Локальные правила для будущих summary |
 | `save_partner`, `list_partners` | Локальная база каналов-партнёров |
 | `create_outreach_draft`, `list_outreach_drafts`, `update_outreach_draft` | Локальные черновики outreach |
+| `watch_add`, `watch_list`, `watch_remove` | Локальный watchlist чатов/топиков для ежедневного дайджеста, с per-chat `focus` (что извлекать/пропускать) |
 
-CRM, preferences, snapshots и outreach drafts хранятся только в SQLite внутри
-`TGMCP_HOME`. Эти инструменты не отправляют сообщения в Telegram.
+CRM, preferences, snapshots, watchlist и outreach drafts хранятся только в SQLite
+внутри `TGMCP_HOME`. Эти инструменты не отправляют сообщения в Telegram.
 
 ### Запись
 
@@ -57,6 +60,7 @@ Write-инструменты выключены по умолчанию. Они 
 | `create_shared_folder` | Создание и экспорт папки с каналами/группами |
 | `update_chat_description` | Изменение или очистка описания группы, супергруппы или канала |
 | `update_profile_bio` | Изменение или очистка bio текущего Telegram-профиля |
+| `send_message` | Отправка текстового или Telegram-HTML сообщения в чат/канал (напр. доставка дайджеста); `topic_id` для форум-топика, `html` для `<b>/<i>/<a>` |
 
 ## Требования
 
@@ -162,6 +166,23 @@ codex mcp list
 - «Добавь Example Channel в кандидаты на взаимный репост»
 - «Опубликуй этот текст завтра в 10:00 без уведомления» — только в write-режиме
 
+## Ежедневный дайджест
+
+`scripts/daily-digest.sh` собирает один дайджест в день из **watchlist** чатов и
+доставляет его в выбранный Telegram-чат. Весь Telegram-I/O идёт через
+детерминированный CLI (`sync`/`dump`/`send`), а LLM используется только как
+суммаризатор текста на stdin (без MCP), поэтому джоба не конфликтует с запущенным
+`tgmcp serve`. Набор чатов задаётся через `tgmcp watch add ...`, поэтому добавление
+чата не требует правок скрипта. Подробнее — в [`scripts/README.md`](scripts/README.md).
+
+Дополнительные CLI-команды помимо `login/serve`:
+
+```text
+tgmcp send [--html] <chat_id> "<text>" [topic_id]   # отправить сообщение
+tgmcp dump <chat_id> [from] [topic_id]              # полный текст окна (вход дайджеста)
+tgmcp watch add <chat_id> [topics_csv] [--label ..] [--focus ..] | watch list [--plain] | watch rm <id>
+```
+
 ## Безопасность и приватность
 
 - Никогда не коммитьте `api_hash`, телефон, 2FA-пароль или Telegram session.
@@ -181,10 +202,11 @@ go vet ./...
 Структура проекта:
 
 ```text
-cmd/tgmcp/       CLI: login, serve и локальные команды
+cmd/tgmcp/       CLI: login, serve, send, dump, watch и локальные команды
 internal/config  env-конфигурация и пути данных
-internal/tgclient MTProto-клиент и Telegram operations
-internal/store   SQLite cache, preferences, CRM и snapshots
+internal/tgclient MTProto-клиент и Telegram operations (вкл. send.go)
+internal/store   SQLite cache, preferences, CRM, snapshots и watchlist
 internal/syncer  синхронизация истории
 internal/mcpserver MCP tools и handlers
+scripts/         ежедневный дайджест (daily-digest.sh) и launchd-агент
 ```
