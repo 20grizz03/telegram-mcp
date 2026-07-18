@@ -125,6 +125,24 @@ func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 	}, h.deletePreference)
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name: "watch_add",
+		Description: "Add (or update) a chat to the watchlist used by the daily digest. " +
+			"Pass topic_ids to restrict to specific forum topics, or omit for the whole chat. " +
+			"Pass focus to describe what to extract/skip for this chat. Keyed by chat_id: " +
+			"re-adding updates topics/label/focus and re-enables it. Local-only.",
+	}, h.watchAdd)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "watch_list",
+		Description: "List watchlist entries (chats tracked for the daily digest). Local-only.",
+	}, h.watchList)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "watch_remove",
+		Description: "Remove a watchlist entry by its id (from watch_list). Local-only.",
+	}, h.watchRemove)
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name: "download_media",
 		Description: "Download the media (photo/document/video/...) attached to a specific message to a local file. " +
 			"Returns the saved path. Read-only.",
@@ -210,6 +228,13 @@ func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 			Description: "Natively forward one REAL Telegram post to another chat while preserving source attribution. " +
 				"This writes to the destination and is only exposed when TGMCP_ENABLE_WRITE is enabled.",
 		}, h.forwardPost)
+
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "send_message",
+			Description: "Send a REAL plain-text or Telegram-HTML message to a chat/channel (e.g. deliver a digest) " +
+				"under YOUR account. Pass topic_id to post into a specific forum topic, html=true to parse " +
+				"<b>/<i>/<a href>/<code>. Link previews are disabled. Only exposed when TGMCP_ENABLE_WRITE is enabled.",
+		}, h.sendMessage)
 	}
 
 	return s
@@ -1063,4 +1088,79 @@ func renderMessages(chat tgclient.Chat, msgs []tgclient.Message) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// ---- send_message (write; gated by TGMCP_ENABLE_WRITE) ----
+
+type sendMessageIn struct {
+	ChatID  int64  `json:"chat_id" jsonschema:"numeric chat id to send to (from list_chats)"`
+	Text    string `json:"text" jsonschema:"message text to send"`
+	TopicID int    `json:"topic_id,omitempty" jsonschema:"forum topic id to post into; 0 = main/non-forum"`
+	HTML    bool   `json:"html,omitempty" jsonschema:"parse text as Telegram HTML (<b>,<i>,<a href>,<code>); default plain"`
+}
+
+type sendMessageOut struct {
+	ChatID    int64 `json:"chat_id"`
+	MessageID int   `json:"message_id"`
+	Sent      bool  `json:"sent"`
+}
+
+func (h *handlers) sendMessage(ctx context.Context, _ *mcp.CallToolRequest, in sendMessageIn) (*mcp.CallToolResult, sendMessageOut, error) {
+	id, err := h.tc.SendMessage(ctx, in.ChatID, in.Text, in.TopicID, in.HTML)
+	if err != nil {
+		return nil, sendMessageOut{}, err
+	}
+	return nil, sendMessageOut{ChatID: in.ChatID, MessageID: id, Sent: true}, nil
+}
+
+// ---- watch_add / watch_list / watch_remove (local-only digest watchlist) ----
+
+type watchAddIn struct {
+	ChatID   int64  `json:"chat_id" jsonschema:"numeric chat id to watch (from list_chats)"`
+	TopicIDs []int  `json:"topic_ids,omitempty" jsonschema:"forum topic ids to include; empty = whole chat"`
+	Label    string `json:"label,omitempty" jsonschema:"human-readable label for this watch"`
+	Focus    string `json:"focus,omitempty" jsonschema:"per-chat digest brief: what to extract and what to skip for this chat"`
+}
+
+type watchAddOut struct {
+	Watch store.Watch `json:"watch"`
+}
+
+func (h *handlers) watchAdd(ctx context.Context, _ *mcp.CallToolRequest, in watchAddIn) (*mcp.CallToolResult, watchAddOut, error) {
+	w, err := h.st.AddWatch(ctx, in.ChatID, in.TopicIDs, in.Label, in.Focus)
+	if err != nil {
+		return nil, watchAddOut{}, err
+	}
+	return nil, watchAddOut{Watch: w}, nil
+}
+
+type watchListIn struct{}
+
+type watchListOut struct {
+	Watchlist []store.Watch `json:"watchlist,omitempty"`
+	Count     int           `json:"count"`
+}
+
+func (h *handlers) watchList(ctx context.Context, _ *mcp.CallToolRequest, _ watchListIn) (*mcp.CallToolResult, watchListOut, error) {
+	ws, err := h.st.ListWatch(ctx, false)
+	if err != nil {
+		return nil, watchListOut{}, err
+	}
+	return nil, watchListOut{Watchlist: ws, Count: len(ws)}, nil
+}
+
+type watchRemoveIn struct {
+	ID int64 `json:"id" jsonschema:"watchlist id from watch_list"`
+}
+
+type watchRemoveOut struct {
+	Removed bool `json:"removed"`
+}
+
+func (h *handlers) watchRemove(ctx context.Context, _ *mcp.CallToolRequest, in watchRemoveIn) (*mcp.CallToolResult, watchRemoveOut, error) {
+	ok, err := h.st.DeleteWatch(ctx, in.ID)
+	if err != nil {
+		return nil, watchRemoveOut{}, err
+	}
+	return nil, watchRemoveOut{Removed: ok}, nil
 }

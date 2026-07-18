@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd agent that runs the daily digest.
+
+  Install (replace the __PLACEHOLDERS__ with real absolute paths first):
+    cp scripts/com.telegram-mcp.digest.plist ~/Library/LaunchAgents/
+    launchctl load  -w ~/Library/LaunchAgents/com.telegram-mcp.digest.plist   # enable
+    launchctl start com.telegram-mcp.digest                                    # run once now
+    launchctl unload   ~/Library/LaunchAgents/com.telegram-mcp.digest.plist    # disable
+
+  It fires several times through the day (09/11/13/15/17/19) so a run that fails
+  because Telegram was briefly unreachable is retried later the same day.
+  RunAtLoad=true ALSO runs it at login to catch up a run missed while the machine
+  was off. A once-per-slot guard in the script sends at most one digest per day
+  and never duplicates. launchd does not wake a sleeping Mac; a missed trigger
+  runs at the next wake.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.telegram-mcp.digest</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__ABSOLUTE_PATH_TO_REPO__/scripts/daily-digest.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Must include the dirs of `claude` (or your CLAUDE_BIN) and its runtime. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>TGMCP_HOME</key>
+    <string>__HOME__/.config/tg-mcp</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.config/tg-mcp/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.config/tg-mcp/launchd.err.log</string>
+</dict>
+</plist>
