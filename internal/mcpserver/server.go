@@ -29,7 +29,7 @@ func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 	h := &handlers{tc: tc, st: st}
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "telegram-mcp",
-		Version: "0.4.4",
+		Version: "0.5.0",
 	}, nil)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -105,6 +105,18 @@ func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 			"messages with sender, date and a clickable t.me link. Pass chat_id to scope to one chat, " +
 			"omit for a global search. Terms match by prefix.",
 	}, h.searchChat)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "search_channels",
+		Description: "Search Telegram's global Channels tab, including public channels the account has not joined. " +
+			"Read-only and free; found channels are cached so read_chat and sync_chat can use their ids.",
+	}, h.searchChannels)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "search_public_posts",
+		Description: "Search full text across public Telegram channel posts. May consume one of Telegram's free " +
+			"daily search slots. Checks quota first and always blocks before any Stars could be charged.",
+	}, h.searchPublicPosts)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "save_preference",
@@ -693,6 +705,53 @@ func (h *handlers) searchChat(ctx context.Context, _ *mcp.CallToolRequest, in se
 		})
 	}
 	return nil, searchChatOut{Hits: out, Count: len(out)}, nil
+}
+
+// ---- search_channels ----
+
+type searchChannelsIn struct {
+	Query string `json:"query" jsonschema:"channel name, username or topic to search for"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max channels (default 20, max 50)"`
+}
+
+type searchChannelsOut struct {
+	Channels []tgclient.ChannelSearchResult `json:"channels,omitempty"`
+	Count    int                            `json:"count"`
+}
+
+func (h *handlers) searchChannels(ctx context.Context, _ *mcp.CallToolRequest, in searchChannelsIn) (*mcp.CallToolResult, searchChannelsOut, error) {
+	channels, err := h.tc.SearchChannels(ctx, in.Query, in.Limit)
+	if err != nil {
+		return nil, searchChannelsOut{}, err
+	}
+	return nil, searchChannelsOut{Channels: channels, Count: len(channels)}, nil
+}
+
+// ---- search_public_posts ----
+
+type searchPublicPostsIn struct {
+	Query string `json:"query" jsonschema:"full-text query across public channel posts"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max posts (default 20, max 50)"`
+}
+
+type searchPublicPostsOut struct {
+	Posts       []tgclient.SearchPost     `json:"posts,omitempty"`
+	Count       int                       `json:"count"`
+	Quota       tgclient.SearchPostsQuota `json:"quota"`
+	BlockedPaid bool                      `json:"blocked_paid"`
+}
+
+func (h *handlers) searchPublicPosts(ctx context.Context, _ *mcp.CallToolRequest, in searchPublicPostsIn) (*mcp.CallToolResult, searchPublicPostsOut, error) {
+	result, err := h.tc.SearchPublicPosts(ctx, in.Query, in.Limit)
+	if err != nil {
+		return nil, searchPublicPostsOut{}, err
+	}
+	return nil, searchPublicPostsOut{
+		Posts:       result.Posts,
+		Count:       len(result.Posts),
+		Quota:       result.Quota,
+		BlockedPaid: result.BlockedPaid,
+	}, nil
 }
 
 // ---- save_preference ----

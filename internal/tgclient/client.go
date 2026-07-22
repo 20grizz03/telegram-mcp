@@ -47,6 +47,7 @@ type peerInfo struct {
 	channelID int64 // raw channel id (for private links), 0 for non-channels
 	isForum   bool
 	title     string
+	min       bool // Telegram min constructors require username resolution before general use
 }
 
 // New builds a gotd client with flood-wait + rate-limit middleware and a logger

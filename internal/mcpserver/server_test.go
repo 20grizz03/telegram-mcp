@@ -300,7 +300,7 @@ func TestToolsRegister(t *testing.T) {
 		"capture_growth_snapshot", "create_outreach_draft", "delete_preference", "download_media", "get_channel_profile",
 		"list_channel_folders", "list_chats", "list_growth_snapshots", "list_invite_links", "list_outreach_drafts",
 		"list_partners", "list_pinned_messages", "list_preferences", "list_scheduled_posts", "list_topics", "read_chat", "save_partner", "save_preference",
-		"search_chat", "sync_chat", "update_outreach_draft",
+		"search_channels", "search_chat", "search_public_posts", "sync_chat", "update_outreach_draft",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("tools = %v, want %v", names, want)

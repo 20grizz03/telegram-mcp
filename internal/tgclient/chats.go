@@ -46,8 +46,11 @@ func (c *Client) resolvePeer(ctx context.Context, id int64) (peerInfo, error) {
 	c.mu.Lock()
 	p, ok := c.peers[id]
 	c.mu.Unlock()
-	if ok {
+	if ok && !p.min {
 		return p, nil
+	}
+	if ok && p.username != "" {
+		return c.resolveUsernamePeer(ctx, p.username, id)
 	}
 
 	if err := c.refreshDialogs(ctx); err != nil {
@@ -57,10 +60,30 @@ func (c *Client) resolvePeer(ctx context.Context, id int64) (peerInfo, error) {
 	c.mu.Lock()
 	p, ok = c.peers[id]
 	c.mu.Unlock()
-	if !ok {
+	if !ok || p.min {
 		return peerInfo{}, fmt.Errorf("chat %d not found; call list_chats first", id)
 	}
 	return p, nil
+}
+
+// resolveUsernamePeer upgrades a public peer returned as a reduced Telegram
+// min constructor into a full peer whose access hash can be used by read APIs.
+func (c *Client) resolveUsernamePeer(ctx context.Context, username string, wantID int64) (peerInfo, error) {
+	resp, err := c.api.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{
+		Username: strings.TrimPrefix(username, "@"),
+	})
+	if err != nil {
+		return peerInfo{}, fmt.Errorf("resolve @%s: %w", strings.TrimPrefix(username, "@"), err)
+	}
+
+	idx := indexEntities(resp.Chats, resp.Users)
+	info, id, ok := idx.peerInfoFor(resp.Peer)
+	if !ok || id != wantID || info.min {
+		return peerInfo{}, fmt.Errorf("resolve @%s: incomplete peer", strings.TrimPrefix(username, "@"))
+	}
+
+	c.mergePeers(map[int64]peerInfo{id: info})
+	return info, nil
 }
 
 // refreshDialogs pulls (a bounded prefix of) the dialog list and rebuilds the
@@ -144,11 +167,27 @@ func (c *Client) refreshDialogs(ctx context.Context) error {
 		}
 	}
 
+	c.mergePeers(peers)
 	c.mu.Lock()
-	c.peers = peers
 	c.lastChats = ordered
 	c.mu.Unlock()
 	return nil
+}
+
+// mergePeers preserves a full access hash when a later search response only
+// contains a lower-priority Telegram min constructor.
+func (c *Client) mergePeers(peers map[int64]peerInfo) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.peers == nil {
+		c.peers = make(map[int64]peerInfo)
+	}
+	for id, info := range peers {
+		if current, ok := c.peers[id]; ok && !current.min && info.min {
+			continue
+		}
+		c.peers[id] = info
+	}
 }
 
 func msgDate(messages []tg.MessageClass, id int) int {

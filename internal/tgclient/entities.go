@@ -77,6 +77,7 @@ func (idx entityIndex) peerInfoFor(peer tg.PeerClass) (peerInfo, int64, bool) {
 			channelID: ch.ID,
 			isForum:   ch.Forum,
 			title:     ch.Title,
+			min:       ch.Min,
 		}, ch.ID, true
 	}
 	return peerInfo{}, 0, false
