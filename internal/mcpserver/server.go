@@ -23,13 +23,14 @@ type handlers struct {
 
 // Build constructs the MCP server with all tools registered. Local CRM/outbox
 // tools never contact Telegram. When enableWrite is true, the posting tools
-// (publish_post, edit_post, pin_post, forward_post,
+// (publish_post, publish_rich_post, edit_post, edit_rich_post,
+// edit_scheduled_post, delete_scheduled_post, pin_post, forward_post,
 // update_chat_description, update_profile_bio) are also exposed.
 func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 	h := &handlers{tc: tc, st: st}
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "telegram-mcp",
-		Version: "0.5.0",
+		Version: "0.6.0",
 	}, nil)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -206,10 +207,35 @@ func Build(tc *tgclient.Client, st *store.Store, enableWrite bool) *mcp.Server {
 		}, h.publishPost)
 
 		mcp.AddTool(s, &mcp.Tool{
+			Name: "publish_rich_post",
+			Description: "Publish a NEW native Telegram Rich Text post under YOUR account. Supports headings, " +
+				"tables, lists, quotes, code, formulas and inline media using rich Markdown or HTML. Exactly one " +
+				"of markdown/html is required. Local photos are referenced as tg://photo?id=<id>. Requires Telegram Premium.",
+		}, h.publishRichPost)
+
+		mcp.AddTool(s, &mcp.Tool{
 			Name: "edit_post",
 			Description: "Edit the text of a post you already published (e.g. fix a typo). text is markdown. " +
 				"Identify the post by chat_id + msg_id.",
 		}, h.editPost)
+
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "edit_rich_post",
+			Description: "Replace an existing post with native Telegram Rich Text content. Exactly one of " +
+				"markdown/html is required. Local photos are referenced as tg://photo?id=<id>. Requires Telegram Premium.",
+		}, h.editRichPost)
+
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "edit_scheduled_post",
+			Description: "Edit the markdown text or caption of a PENDING scheduled post while preserving its " +
+				"publication time. This changes the real Telegram queue and is only exposed when TGMCP_ENABLE_WRITE is enabled.",
+		}, h.editScheduledPost)
+
+		mcp.AddTool(s, &mcp.Tool{
+			Name: "delete_scheduled_post",
+			Description: "Remove one PENDING scheduled post from the real Telegram queue. It never deletes an " +
+				"already-published message and is only exposed when TGMCP_ENABLE_WRITE is enabled.",
+		}, h.deleteScheduledPost)
 
 		mcp.AddTool(s, &mcp.Tool{
 			Name: "pin_post",
@@ -1063,6 +1089,59 @@ func (h *handlers) publishPost(ctx context.Context, _ *mcp.CallToolRequest, in p
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}, out, nil
 }
 
+// ---- publish_rich_post ----
+
+type richPhotoIn struct {
+	ID   string `json:"id" jsonschema:"media id used in tg://photo?id=<id>; 1-64 characters: letters, digits, underscore or hyphen"`
+	Path string `json:"path" jsonschema:"local image file path to upload and embed"`
+}
+
+type publishRichPostIn struct {
+	ChatID          int64         `json:"chat_id" jsonschema:"numeric chat id from list_chats"`
+	Markdown        string        `json:"markdown,omitempty" jsonschema:"native Telegram Rich Markdown; mutually exclusive with html"`
+	HTML            string        `json:"html,omitempty" jsonschema:"native Telegram Rich HTML; mutually exclusive with markdown"`
+	Photos          []richPhotoIn `json:"photos,omitempty" jsonschema:"local photos embedded by matching tg://photo?id=<id> references"`
+	RTL             bool          `json:"rtl,omitempty" jsonschema:"render the whole rich message right-to-left"`
+	DisableAutoLink bool          `json:"disable_auto_link,omitempty" jsonschema:"disable automatic detection of URLs, mentions, hashtags and phone numbers"`
+	ScheduledAt     string        `json:"scheduled_at,omitempty" jsonschema:"when to publish: Nd/Nh/Nm from now, YYYY-MM-DD or RFC3339; omit to post now"`
+	Silent          bool          `json:"silent,omitempty" jsonschema:"post without a notification to subscribers"`
+}
+
+func toRichPhotos(in []richPhotoIn) []tgclient.RichPhoto {
+	out := make([]tgclient.RichPhoto, len(in))
+	for i, photo := range in {
+		out[i] = tgclient.RichPhoto{ID: photo.ID, Path: photo.Path}
+	}
+	return out
+}
+
+func (h *handlers) publishRichPost(ctx context.Context, _ *mcp.CallToolRequest, in publishRichPostIn) (*mcp.CallToolResult, publishPostOut, error) {
+	when, err := tgclient.ParseFutureInstant(in.ScheduledAt, h.tc.Location())
+	if err != nil {
+		return nil, publishPostOut{}, err
+	}
+	m, err := h.tc.PublishRichPost(
+		ctx,
+		in.ChatID,
+		in.Markdown,
+		in.HTML,
+		toRichPhotos(in.Photos),
+		in.RTL,
+		in.DisableAutoLink,
+		when,
+		in.Silent,
+	)
+	if err != nil {
+		return nil, publishPostOut{}, err
+	}
+	out := publishPostOut{MsgID: m.ID, Link: m.Link, Scheduled: !when.IsZero()}
+	msg := fmt.Sprintf("published rich msg_id=%d %s", out.MsgID, out.Link)
+	if out.Scheduled {
+		msg = fmt.Sprintf("scheduled rich msg_id=%d for %s", out.MsgID, when.Format(time.RFC3339))
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}, out, nil
+}
+
 // ---- edit_post ----
 
 type editPostIn struct {
@@ -1082,6 +1161,74 @@ func (h *handlers) editPost(ctx context.Context, _ *mcp.CallToolRequest, in edit
 		return nil, editPostOut{}, err
 	}
 	return nil, editPostOut{MsgID: m.ID, Link: m.Link}, nil
+}
+
+// ---- edit_rich_post ----
+
+type editRichPostIn struct {
+	ChatID          int64         `json:"chat_id" jsonschema:"numeric chat id from list_chats"`
+	MsgID           int           `json:"msg_id" jsonschema:"id of the post to edit"`
+	Markdown        string        `json:"markdown,omitempty" jsonschema:"native Telegram Rich Markdown; mutually exclusive with html"`
+	HTML            string        `json:"html,omitempty" jsonschema:"native Telegram Rich HTML; mutually exclusive with markdown"`
+	Photos          []richPhotoIn `json:"photos,omitempty" jsonschema:"local photos embedded by matching tg://photo?id=<id> references"`
+	RTL             bool          `json:"rtl,omitempty" jsonschema:"render the whole rich message right-to-left"`
+	DisableAutoLink bool          `json:"disable_auto_link,omitempty" jsonschema:"disable automatic detection of URLs, mentions, hashtags and phone numbers"`
+}
+
+func (h *handlers) editRichPost(ctx context.Context, _ *mcp.CallToolRequest, in editRichPostIn) (*mcp.CallToolResult, editPostOut, error) {
+	m, err := h.tc.EditRichPost(
+		ctx,
+		in.ChatID,
+		in.MsgID,
+		in.Markdown,
+		in.HTML,
+		toRichPhotos(in.Photos),
+		in.RTL,
+		in.DisableAutoLink,
+	)
+	if err != nil {
+		return nil, editPostOut{}, err
+	}
+	return nil, editPostOut{MsgID: m.ID, Link: m.Link}, nil
+}
+
+// ---- edit_scheduled_post ----
+
+type editScheduledPostIn struct {
+	ChatID int64  `json:"chat_id" jsonschema:"numeric chat id from list_chats"`
+	MsgID  int    `json:"msg_id" jsonschema:"id of a pending post from list_scheduled_posts"`
+	Text   string `json:"text" jsonschema:"new post body or media caption in markdown"`
+}
+
+type editScheduledPostOut struct {
+	MsgID     int  `json:"msg_id"`
+	Scheduled bool `json:"scheduled"`
+}
+
+func (h *handlers) editScheduledPost(ctx context.Context, _ *mcp.CallToolRequest, in editScheduledPostIn) (*mcp.CallToolResult, editScheduledPostOut, error) {
+	m, err := h.tc.EditScheduledPost(ctx, in.ChatID, in.MsgID, in.Text)
+	if err != nil {
+		return nil, editScheduledPostOut{}, err
+	}
+	return nil, editScheduledPostOut{MsgID: m.ID, Scheduled: true}, nil
+}
+
+// ---- delete_scheduled_post ----
+
+type deleteScheduledPostIn struct {
+	ChatID int64 `json:"chat_id" jsonschema:"numeric chat id from list_chats"`
+	MsgID  int   `json:"msg_id" jsonschema:"id of a pending post from list_scheduled_posts"`
+}
+
+type deleteScheduledPostOut struct {
+	Deleted bool `json:"deleted"`
+}
+
+func (h *handlers) deleteScheduledPost(ctx context.Context, _ *mcp.CallToolRequest, in deleteScheduledPostIn) (*mcp.CallToolResult, deleteScheduledPostOut, error) {
+	if err := h.tc.DeleteScheduledPost(ctx, in.ChatID, in.MsgID); err != nil {
+		return nil, deleteScheduledPostOut{}, err
+	}
+	return nil, deleteScheduledPostOut{Deleted: true}, nil
 }
 
 // ---- pin_post ----
