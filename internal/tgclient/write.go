@@ -3,10 +3,13 @@ package tgclient
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/message/markdown"
+	"github.com/gotd/td/telegram/message/rich"
 	"github.com/gotd/td/telegram/message/styling"
 	"github.com/gotd/td/telegram/message/unpack"
 	"github.com/gotd/td/tg"
@@ -17,6 +20,15 @@ import (
 func md(text string) styling.StyledTextOption {
 	return markdown.String(nil, text)
 }
+
+// RichPhoto identifies a local photo that can be embedded into rich Markdown
+// or HTML with tg://photo?id=<ID>.
+type RichPhoto struct {
+	ID   string
+	Path string
+}
+
+var richFileIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // UpdateChatDescription changes the description of a basic group,
 // supergroup or channel. An empty description clears the existing value.
@@ -114,6 +126,124 @@ func (c *Client) PublishPost(ctx context.Context, chatID int64, text, photoPath,
 	return c.builtMessage(chatID, id, text, pi, scheduledAt), nil
 }
 
+// PublishRichPost publishes a native Telegram rich message. Exactly one of
+// markdownText and htmlText must be set. Local photos can be referenced from
+// the source as tg://photo?id=<ID>. HTTP(S) media URLs can be embedded directly
+// using Telegram's rich Markdown/HTML syntax.
+func (c *Client) PublishRichPost(
+	ctx context.Context,
+	chatID int64,
+	markdownText, htmlText string,
+	photos []RichPhoto,
+	rtl, disableAutoLink bool,
+	scheduledAt time.Time,
+	silent bool,
+) (Message, error) {
+	if err := validateRichSource(markdownText, htmlText, photos); err != nil {
+		return Message{}, err
+	}
+
+	pi, err := c.resolvePeer(ctx, chatID)
+	if err != nil {
+		return Message{}, err
+	}
+
+	b := &c.sender.To(pi.input).Builder
+	if silent {
+		b = b.Silent()
+	}
+	if !scheduledAt.IsZero() {
+		b = b.Schedule(scheduledAt)
+	}
+
+	source, err := c.prepareRichSource(ctx, b, markdownText, htmlText, photos, rtl, disableAutoLink)
+	if err != nil {
+		return Message{}, err
+	}
+	id, err := publishedMessageID(b.RichMessage(ctx, source))
+	if err != nil {
+		return Message{}, fmt.Errorf("publish rich message to %d: %w", chatID, err)
+	}
+
+	text := markdownText
+	if text == "" {
+		text = htmlText
+	}
+	return c.builtMessage(chatID, id, text, pi, scheduledAt), nil
+}
+
+func validateRichSource(markdownText, htmlText string, photos []RichPhoto) error {
+	hasMarkdown := strings.TrimSpace(markdownText) != ""
+	hasHTML := strings.TrimSpace(htmlText) != ""
+	if hasMarkdown == hasHTML {
+		return fmt.Errorf("provide exactly one of markdown or html")
+	}
+
+	seen := make(map[string]struct{}, len(photos))
+	for i, photo := range photos {
+		if !richFileIDPattern.MatchString(photo.ID) {
+			return fmt.Errorf("photos[%d].id must be 1-64 characters using only A-Z, a-z, 0-9, _ or -", i)
+		}
+		if strings.TrimSpace(photo.Path) == "" {
+			return fmt.Errorf("photos[%d].path is required", i)
+		}
+		if _, ok := seen[photo.ID]; ok {
+			return fmt.Errorf("duplicate rich photo id %q", photo.ID)
+		}
+		seen[photo.ID] = struct{}{}
+	}
+	return nil
+}
+
+func (c *Client) prepareRichSource(
+	ctx context.Context,
+	b *message.Builder,
+	markdownText, htmlText string,
+	photos []RichPhoto,
+	rtl, disableAutoLink bool,
+) (tg.InputRichMessageClass, error) {
+	source := rich.Rich()
+	if rtl {
+		source = source.RTL()
+	}
+	if disableAutoLink {
+		source = source.NoAutoLink()
+	}
+
+	for _, photo := range photos {
+		file, err := c.uploader.FromPath(ctx, photo.Path)
+		if err != nil {
+			return nil, fmt.Errorf("upload rich photo %q from %q: %w", photo.ID, photo.Path, err)
+		}
+		uploaded, err := b.UploadMedia(ctx, message.UploadedPhoto(file))
+		if err != nil {
+			return nil, fmt.Errorf("prepare rich photo %q: %w", photo.ID, err)
+		}
+		input, err := inputPhotoFromMedia(uploaded)
+		if err != nil {
+			return nil, fmt.Errorf("prepare rich photo %q: %w", photo.ID, err)
+		}
+		source = source.Photo(photo.ID, input)
+	}
+
+	if strings.TrimSpace(markdownText) != "" {
+		return source.Markdown(markdownText), nil
+	}
+	return source.HTML(htmlText), nil
+}
+
+func inputPhotoFromMedia(media tg.MessageMediaClass) (*tg.InputPhoto, error) {
+	photoMedia, ok := media.(*tg.MessageMediaPhoto)
+	if !ok {
+		return nil, fmt.Errorf("telegram returned %T instead of photo media", media)
+	}
+	photo, ok := photoMedia.Photo.(*tg.Photo)
+	if !ok {
+		return nil, fmt.Errorf("telegram returned %T instead of a reusable photo", photoMedia.Photo)
+	}
+	return photo.AsInput(), nil
+}
+
 // publishedMessageID extracts both regular and scheduled message ids. gotd's
 // unpack.MessageID intentionally recognizes only updateNewMessage and
 // updateNewChannelMessage, while Telegram returns updateNewScheduledMessage
@@ -164,6 +294,100 @@ func (c *Client) EditPost(ctx context.Context, chatID int64, msgID int, text str
 	}
 	if _, err := c.sender.To(pi.input).Edit(msgID).StyledText(ctx, md(text)); err != nil {
 		return Message{}, fmt.Errorf("edit %d in %d: %w", msgID, chatID, err)
+	}
+	return c.builtMessage(chatID, msgID, text, pi, time.Time{}), nil
+}
+
+// EditScheduledPost replaces the text of a pending scheduled message while
+// preserving its publication time. Telegram requires schedule_date when
+// editing a scheduled message; using EditPost can otherwise return success
+// without changing the pending item.
+func (c *Client) EditScheduledPost(ctx context.Context, chatID int64, msgID int, text string) (Message, error) {
+	if msgID <= 0 {
+		return Message{}, fmt.Errorf("msg_id must be positive")
+	}
+	if text == "" {
+		return Message{}, fmt.Errorf("text is required")
+	}
+	pi, err := c.resolvePeer(ctx, chatID)
+	if err != nil {
+		return Message{}, err
+	}
+
+	resp, err := c.api.MessagesGetScheduledMessages(ctx, &tg.MessagesGetScheduledMessagesRequest{
+		Peer: pi.input,
+		ID:   []int{msgID},
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("get scheduled message %d in %d: %w", msgID, chatID, err)
+	}
+	msgs, _, _ := extractMessages(resp)
+	var scheduledAt time.Time
+	for _, mc := range msgs {
+		if m, ok := mc.(*tg.Message); ok && m.ID == msgID {
+			scheduledAt = time.Unix(int64(m.Date), 0)
+			break
+		}
+	}
+	if scheduledAt.IsZero() {
+		return Message{}, fmt.Errorf("scheduled message %d not found in %d", msgID, chatID)
+	}
+
+	b := c.sender.To(pi.input).Builder.Schedule(scheduledAt)
+	if _, err := b.Edit(msgID).StyledText(ctx, md(text)); err != nil {
+		return Message{}, fmt.Errorf("edit scheduled %d in %d: %w", msgID, chatID, err)
+	}
+	return c.builtMessage(chatID, msgID, text, pi, scheduledAt), nil
+}
+
+// DeleteScheduledPost removes one pending scheduled message. It never deletes
+// an already-published message.
+func (c *Client) DeleteScheduledPost(ctx context.Context, chatID int64, msgID int) error {
+	if msgID <= 0 {
+		return fmt.Errorf("msg_id must be positive")
+	}
+	pi, err := c.resolvePeer(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if _, err := c.sender.To(pi.input).Scheduled().Delete(ctx, msgID); err != nil {
+		return fmt.Errorf("delete scheduled %d in %d: %w", msgID, chatID, err)
+	}
+	return nil
+}
+
+// EditRichPost replaces a message with native Telegram rich content.
+func (c *Client) EditRichPost(
+	ctx context.Context,
+	chatID int64,
+	msgID int,
+	markdownText, htmlText string,
+	photos []RichPhoto,
+	rtl, disableAutoLink bool,
+) (Message, error) {
+	if msgID <= 0 {
+		return Message{}, fmt.Errorf("msg_id must be positive")
+	}
+	if err := validateRichSource(markdownText, htmlText, photos); err != nil {
+		return Message{}, err
+	}
+
+	pi, err := c.resolvePeer(ctx, chatID)
+	if err != nil {
+		return Message{}, err
+	}
+	b := &c.sender.To(pi.input).Builder
+	source, err := c.prepareRichSource(ctx, b, markdownText, htmlText, photos, rtl, disableAutoLink)
+	if err != nil {
+		return Message{}, err
+	}
+	if _, err := b.Edit(msgID).RichMessage(ctx, source); err != nil {
+		return Message{}, fmt.Errorf("edit rich message %d in %d: %w", msgID, chatID, err)
+	}
+
+	text := markdownText
+	if text == "" {
+		text = htmlText
 	}
 	return c.builtMessage(chatID, msgID, text, pi, time.Time{}), nil
 }

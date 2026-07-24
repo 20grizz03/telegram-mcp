@@ -264,6 +264,11 @@ func (c *Client) mapMessage(m *tg.Message, idx entityIndex, info peerInfo, topic
 
 	media := mediaInfoFor(m.Media)
 	text := m.Message
+	if text == "" {
+		if richMessage, ok := m.GetRichMessage(); ok {
+			text = renderRichMessage(richMessage)
+		}
+	}
 	if text == "" && media != nil {
 		text = mediaLabel(media)
 	}

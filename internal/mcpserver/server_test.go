@@ -241,7 +241,7 @@ func toolNames(t *testing.T, enableWrite bool) map[string]bool {
 }
 
 func TestWriteToolsGatedByFlag(t *testing.T) {
-	write := []string{"create_invite_link", "create_shared_folder", "edit_post", "forward_post", "pin_post", "publish_post", "update_chat_description", "update_profile_bio"}
+	write := []string{"create_invite_link", "create_shared_folder", "delete_scheduled_post", "edit_post", "edit_rich_post", "edit_scheduled_post", "forward_post", "pin_post", "publish_post", "publish_rich_post", "update_chat_description", "update_profile_bio"}
 
 	off := toolNames(t, false)
 	for _, n := range write {
